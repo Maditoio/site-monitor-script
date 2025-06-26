@@ -1,4 +1,4 @@
-#v 1.1
+# v 1.1
 import firebase_admin
 from firebase_admin import credentials, firestore
 import random
@@ -109,3 +109,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
