@@ -5,6 +5,7 @@ import time
 import logging
 import os
 from datetime import datetime
+import json
 
 # This is a new version of the code
 # Set up logging
@@ -15,7 +16,14 @@ logging.basicConfig(
 )
 
 # Get site_id from environment or fallback
-SITE_ID = os.getenv('SITE_ID', 'default_site')
+try:
+    with open("/home/mumbamukendi/site-monitor/config.json") as f:
+        config = json.load(f)
+        SITE_ID = config.get("site_id", "default_site")
+except Exception as e:
+    logging.error(f"Failed to read config.json: {e}")
+    SITE_ID = "default_site"
+
 
 # Initialize Firebase
 try:
