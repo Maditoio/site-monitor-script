@@ -100,7 +100,7 @@ def main():
                 logging.info(f"Event logged: {event}")
                 print(f"Event logged: {event}")
 
-            time.sleep(random.randint(5, 30))
+            time.sleep(random.randint(50, 60))
 
         except Exception as e:
             logging.error(f"Error: {e}")
