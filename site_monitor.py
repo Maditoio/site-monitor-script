@@ -1,3 +1,4 @@
+# v2.1 - Reliable AC/DC Event + Meter Updates
 import firebase_admin
 from firebase_admin import credentials, firestore
 import random
@@ -7,15 +8,14 @@ import os
 from datetime import datetime
 import json
 
-# This is a new version of the code
-# Set up logging
+# Logging setup
 logging.basicConfig(
     filename='site_monitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Get site_id from environment or fallback
+# Load SITE_ID from config
 try:
     with open("/home/mumbamukendi/site-monitor/config.json") as f:
         config = json.load(f)
@@ -24,8 +24,7 @@ except Exception as e:
     logging.error(f"Failed to read config.json: {e}")
     SITE_ID = "default_site"
 
-
-# Initialize Firebase
+# Firebase init
 try:
     cred = credentials.Certificate('/home/mumbamukendi/site-monitor/firebase-credentials/firebase.json')
     firebase_admin.initialize_app(cred)
@@ -35,13 +34,15 @@ except Exception as e:
     logging.error(f"Failed to initialize Firestore: {e}")
     exit(1)
 
-# Last known states
+# State tracking
 last_state = {
     "phase1": True,
     "phase2": True,
     "phase3": True,
     "dc_power": True
 }
+last_meter_push = 0
+METER_PUSH_INTERVAL = 1800  # 30 minutes
 
 def simulate_readings():
     return {
@@ -51,17 +52,41 @@ def simulate_readings():
         'dc_battery_level': round(random.uniform(10, 15), 2),
         'meter_units': round(random.uniform(1000, 2000), 2),
         'dc_power_status': random.choice([True, False]),
-        'timestamp': firestore.SERVER_TIMESTAMP
+        'timestamp': datetime.utcnow()
     }
 
 def voltage_ok(v):
-    return v >= 190
+    return v > 190  # AC considered off at 190 and below
 
-def detect_events(reading):
+def build_event(reading, event_type):
+    return {
+        "site_id": SITE_ID,
+        "event_type": event_type,
+        "details": {
+            "phase1": {
+                "voltage": reading['phase1_voltage'],
+                "status": "ok" if voltage_ok(reading['phase1_voltage']) else "off"
+            },
+            "phase2": {
+                "voltage": reading['phase2_voltage'],
+                "status": "ok" if voltage_ok(reading['phase2_voltage']) else "off"
+            },
+            "phase3": {
+                "voltage": reading['phase3_voltage'],
+                "status": "ok" if voltage_ok(reading['phase3_voltage']) else "off"
+            },
+            "dc_power": {
+                "status": "on" if reading['dc_power_status'] else "off"
+            },
+            "meter_units": reading['meter_units']
+        },
+        "timestamp": reading['timestamp']
+    }
+
+def detect_changes(reading):
     global last_state
-    events = []
+    changes_detected = False
 
-    # Determine states
     current_state = {
         "phase1": voltage_ok(reading['phase1_voltage']),
         "phase2": voltage_ok(reading['phase2_voltage']),
@@ -69,23 +94,16 @@ def detect_events(reading):
         "dc_power": reading['dc_power_status']
     }
 
-    # Compare with last state
-    for key in current_state:
-        if current_state[key] != last_state[key]:
-            state_text = "restored" if current_state[key] else "dropped"
-            event = {
-                "site_id": SITE_ID,
-                "event_type": f"{key}_{state_text}",
-                "details": f"{key.replace('_', ' ').title()} {state_text}",
-                "timestamp": datetime.utcnow()
-            }
-            events.append(event)
-            last_state[key] = current_state[key]
+    if current_state != last_state:
+        changes_detected = True
+        last_state = current_state.copy()
 
-    return events
+    return changes_detected
 
 def main():
-    # Find site document
+    global last_meter_push
+
+    # Reference to Firestore site
     sites = db.collection('sites')
     target_doc = sites.where("site_id", "==", SITE_ID).limit(1).stream()
     site_doc = next(target_doc, None)
@@ -95,18 +113,27 @@ def main():
         print(f"Site with site_id={SITE_ID} not found")
         return
 
-    # References
     events_ref = sites.document(site_doc.id).collection("events")
 
     while True:
         try:
             reading = simulate_readings()
-            events = detect_events(reading)
+            now = time.time()
 
-            for event in events:
-                events_ref.add(event)
-                logging.info(f"Event logged: {event}")
-                print(f"Event logged: {event}")
+            # Always send meter reading every 30 minutes
+            if now - last_meter_push > METER_PUSH_INTERVAL:
+                meter_event = build_event(reading, "meter_update")
+                events_ref.add(meter_event)
+                logging.info(f"Meter event logged: {meter_event}")
+                print(f"Meter event logged: {meter_event}")
+                last_meter_push = now
+
+            # Send power status if changed
+            if detect_changes(reading):
+                power_event = build_event(reading, "power_status_change")
+                events_ref.add(power_event)
+                logging.info(f"Power event logged: {power_event}")
+                print(f"Power event logged: {power_event}")
 
             time.sleep(random.randint(50, 60))
 
@@ -117,4 +144,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
