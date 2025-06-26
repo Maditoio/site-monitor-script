@@ -1,39 +1,38 @@
-#testing cron v1
+#latest version with network retry
 import firebase_admin
 from firebase_admin import credentials, firestore
 import random
 import time
 import logging
 import os
-import json
 
 # Set up logging
 logging.basicConfig(
-    filename='/home/mumbamukendi/site-monitor/site_monitor.log',
+    filename='site_monitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Load site_id from config.json
+# Load site ID from config file
 CONFIG_FILE = "/home/mumbamukendi/site-monitor/config.json"
+SITE_ID = "default_site"
 
 try:
     with open(CONFIG_FILE, "r") as f:
+        import json
         config = json.load(f)
-        SITE_ID = config.get("site_id", "default_site")
-        logging.info(f"Loaded site_id from config: {SITE_ID}")
+        SITE_ID = config.get("site_id", SITE_ID)
 except Exception as e:
-    SITE_ID = "default_site"
-    logging.error(f"Failed to load config.json: {e}")
+    logging.error(f"Failed to read config file: {e}")
 
 # Initialize Firebase
 try:
     cred = credentials.Certificate('/home/mumbamukendi/site-monitor/firebase-credentials/firebase.json')
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-    logging.info("Firestore initialized successfully")
+    logging.info(f"✅ Firestore initialized for site {SITE_ID}")
 except Exception as e:
-    logging.error(f"Failed to initialize Firestore: {e}")
+    logging.error(f"❌ Failed to initialize Firestore: {e}")
     exit(1)
 
 def simulate_readings():
@@ -48,29 +47,41 @@ def simulate_readings():
     }
 
 def main():
-    sites = db.collection('sites')
-    target_doc = sites.where("site_id", "==", SITE_ID).limit(1).stream()
-    site_doc = next(target_doc, None)
+    backoff = 10  # start with 10 seconds
+    max_backoff = 300  # max 5 minutes
 
-    if not site_doc:
-        logging.error(f"Site with site_id={SITE_ID} not found")
-        print(f"❌ Site with site_id={SITE_ID} not found")
-        return
-
-    site_ref = sites.document(site_doc.id).collection("readings")
+    site_ref = None
 
     while True:
         try:
+            if site_ref is None:
+                sites = db.collection('sites')
+                target_doc = sites.where("site_id", "==", SITE_ID).limit(1).stream()
+                site_doc = next(target_doc, None)
+
+                if not site_doc:
+                    logging.error(f"❌ Site with site_id={SITE_ID} not found")
+                    print(f"Site with site_id={SITE_ID} not found")
+                    time.sleep(backoff)
+                    continue
+
+                site_ref = sites.document(site_doc.id).collection("readings")
+                logging.info(f"✅ Connected to site document {SITE_ID}")
+                backoff = 10  # reset on success
+
             reading = simulate_readings()
             site_ref.add(reading)
-            logging.info(f"✅ Sent data for {SITE_ID}: {reading}")
-            print(f"✅ Sent data for {SITE_ID}: {reading}")
-            time.sleep(random.randint(5, 30))
+            logging.info(f"📡 Sent data: {reading}")
+            print(f"📡 Sent data for {SITE_ID}: {reading}")
+
+            time.sleep(random.randint(10, 30))
+
         except Exception as e:
-            logging.error(f"Error sending reading: {e}")
-            print(f"❌ Error: {e}")
-            time.sleep(10)
+            logging.error(f"⚠️ Error: {e}")
+            print(f"⚠️ Error: {e}")
+            site_ref = None  # reset connection
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)  # exponential backoff
 
 if __name__ == "__main__":
     main()
-
