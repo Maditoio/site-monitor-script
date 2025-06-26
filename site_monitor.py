@@ -1,4 +1,3 @@
-# v 1.1
 import firebase_admin
 from firebase_admin import credentials, firestore
 import random
@@ -7,6 +6,7 @@ import logging
 import os
 from datetime import datetime
 
+# This is a new version of the code
 # Set up logging
 logging.basicConfig(
     filename='site_monitor.log',
