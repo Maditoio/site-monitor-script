@@ -4,61 +4,77 @@ import random
 import time
 import logging
 import os
+import sys
 import json
-from datetime import datetime
-import socket
+from datetime import datetime, timedelta
 
-# Constants
-CONFIG_PATH = "/home/mumbamukendi/site-monitor/config.json"
-CREDENTIALS_PATH = "/home/mumbamukendi/site-monitor/firebase-credentials/firebase.json"
-
-# Setup logging
+# === Logging Setup ===
 logging.basicConfig(
-    filename='site_monitor.log',
+    filename='/home/mumbamukendi/site-monitor/site_monitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Globals
-db = None
+# === Configuration Path ===
+CONFIG_PATH = '/home/mumbamukendi/site-monitor/config.json'
+CREDENTIALS_PATH = '/home/mumbamukendi/site-monitor/firebase-credentials/firebase.json'
+
+# === Read Site ID from config.json ===
+try:
+    with open(CONFIG_PATH) as f:
+        config = json.load(f)
+        SITE_ID = config.get("site_id", "default_site")
+except Exception as e:
+    logging.error(f"Failed to read config.json: {e}")
+    SITE_ID = "default_site"
+
+# === Firebase Initialization ===
+def init_firestore():
+    try:
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(CREDENTIALS_PATH)
+            firebase_admin.initialize_app(cred)
+        return firestore.client()
+    except Exception as e:
+        logging.critical(f"Failed to initialize Firebase: {e}")
+        return None
+
+db = init_firestore()
+if not db:
+    sys.exit(1)
+
+# === Site References ===
+def get_site_ref():
+    try:
+        sites = db.collection('sites')
+        query = sites.where("site_id", "==", SITE_ID).limit(1).stream()
+        site_doc = next(query, None)
+        if site_doc:
+            return sites.document(site_doc.id)
+        else:
+            logging.error(f"Site with site_id={SITE_ID} not found")
+            return None
+    except Exception as e:
+        logging.error(f"Failed to get site reference: {e}")
+        return None
+
+site_ref = get_site_ref()
+if not site_ref:
+    sys.exit(1)
+
+events_ref = site_ref.collection("events")
+readings_ref = site_ref.collection("latest")
+
+# === State Tracking ===
 last_state = {
     "phase1": True,
     "phase2": True,
     "phase3": True,
     "dc_power": True
 }
-last_meter_sent = None
+last_meter_report = datetime.utcnow() - timedelta(minutes=30)
 
-def read_site_id():
-    try:
-        with open(CONFIG_PATH) as f:
-            config = json.load(f)
-            return config.get("site_id", "default_site")
-    except Exception as e:
-        logging.error(f"Failed to read config.json: {e}")
-        return "default_site"
-
-def initialize_firestore():
-    global db
-    try:
-        # Cleanup previous app if any
-        if firebase_admin._apps:
-            firebase_admin.delete_app(firebase_admin.get_app())
-    except Exception:
-        pass
-
-    cred = credentials.Certificate(CREDENTIALS_PATH)
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    logging.info("Firestore initialized.")
-
-def is_connected():
-    try:
-        socket.create_connection(("8.8.8.8", 53), timeout=5)
-        return True
-    except OSError:
-        return False
-
+# === Simulation Function ===
 def simulate_readings():
     return {
         'phase1_voltage': round(random.uniform(0, 240), 2),
@@ -71,135 +87,89 @@ def simulate_readings():
     }
 
 def voltage_ok(v):
-    return v >= 190
+    return v > 190
 
-def detect_events(reading, site_id):
+def detect_power_event(reading):
     global last_state
     events = []
 
-    current_state = {
+    state_now = {
         "phase1": voltage_ok(reading['phase1_voltage']),
         "phase2": voltage_ok(reading['phase2_voltage']),
         "phase3": voltage_ok(reading['phase3_voltage']),
         "dc_power": reading['dc_power_status']
     }
 
-    # Detect changes per phase and dc_power
-    for key in current_state:
-        if current_state[key] != last_state[key]:
-            status_text = "restored" if current_state[key] else "dropped"
-            event = {
-                "site_id": site_id,
-                "event_type": f"{key}_{status_text}",
+    for key in state_now:
+        if state_now[key] != last_state[key]:
+            status = "restored" if state_now[key] else "dropped"
+            events.append({
+                "site_id": SITE_ID,
+                "event_type": f"{key}_status_change",
                 "details": {
-                    "phase1": {
-                        "voltage": reading['phase1_voltage'],
-                        "status": "ok" if current_state["phase1"] else "off"
-                    },
-                    "phase2": {
-                        "voltage": reading['phase2_voltage'],
-                        "status": "ok" if current_state["phase2"] else "off"
-                    },
-                    "phase3": {
-                        "voltage": reading['phase3_voltage'],
-                        "status": "ok" if current_state["phase3"] else "off"
-                    },
-                    "dc_power": {
-                        "status": "on" if current_state["dc_power"] else "off"
-                    },
-                    "meter_units": reading['meter_units']
+                    "phase1": {"voltage": reading["phase1_voltage"], "status": "ok" if state_now["phase1"] else "off"},
+                    "phase2": {"voltage": reading["phase2_voltage"], "status": "ok" if state_now["phase2"] else "off"},
+                    "phase3": {"voltage": reading["phase3_voltage"], "status": "ok" if state_now["phase3"] else "off"},
+                    "dc_power": {"status": "on" if state_now["dc_power"] else "off"},
+                    "meter_units": reading["meter_units"]
                 },
                 "timestamp": datetime.utcnow()
-            }
-            events.append(event)
-            last_state[key] = current_state[key]
+            })
+            last_state[key] = state_now[key]
 
     return events
 
-def create_meter_event(reading, site_id):
-    event = {
-        "site_id": site_id,
-        "event_type": "meter_reading",
+def meter_event_due():
+    global last_meter_report
+    now = datetime.utcnow()
+    if (now - last_meter_report).total_seconds() >= 1800:
+        last_meter_report = now
+        return True
+    return False
+
+def create_meter_event(reading):
+    return {
+        "site_id": SITE_ID,
+        "event_type": "meter_update",
         "details": {
-            "phase1": {
-                "voltage": reading['phase1_voltage'],
-                "status": "ok" if voltage_ok(reading['phase1_voltage']) else "off"
-            },
-            "phase2": {
-                "voltage": reading['phase2_voltage'],
-                "status": "ok" if voltage_ok(reading['phase2_voltage']) else "off"
-            },
-            "phase3": {
-                "voltage": reading['phase3_voltage'],
-                "status": "ok" if voltage_ok(reading['phase3_voltage']) else "off"
-            },
-            "dc_power": {
-                "status": "on" if reading['dc_power_status'] else "off"
-            },
-            "meter_units": reading['meter_units']
+            "phase1": {"voltage": reading["phase1_voltage"], "status": "ok" if voltage_ok(reading["phase1_voltage"]) else "off"},
+            "phase2": {"voltage": reading["phase2_voltage"], "status": "ok" if voltage_ok(reading["phase2_voltage"]) else "off"},
+            "phase3": {"voltage": reading["phase3_voltage"], "status": "ok" if voltage_ok(reading["phase3_voltage"]) else "off"},
+            "dc_power": {"status": "on" if reading["dc_power_status"] else "off"},
+            "meter_units": reading["meter_units"]
         },
         "timestamp": datetime.utcnow()
     }
-    return event
 
 def main():
-    global last_meter_sent
-    site_id = read_site_id()
-    logging.info(f"Starting site monitor for site_id={site_id}")
+    global db, site_ref
 
     while True:
         try:
-            if not is_connected():
-                logging.warning("No internet connection. Retrying in 30 seconds...")
-                time.sleep(30)
-                continue
+            reading = simulate_readings()
 
-            # Initialize Firestore client
-            initialize_firestore()
+            # Update real-time status
+            readings_ref.document("latest").set(reading)
 
-            # Find site document once per run loop
-            sites = db.collection('sites')
-            target_doc = sites.where("site_id", "==", site_id).limit(1).stream()
-            site_doc = next(target_doc, None)
+            # Detect and push events
+            events = detect_power_event(reading)
+            if meter_event_due():
+                events.append(create_meter_event(reading))
 
-            if not site_doc:
-                logging.error(f"Site with site_id={site_id} not found in Firestore")
-                time.sleep(60)
-                continue
+            for event in events:
+                events_ref.add(event)
+                logging.info(f"Event sent: {event}")
 
-            events_ref = sites.document(site_doc.id).collection("events")
+            time.sleep(random.randint(10, 20))
 
-            # Track last meter event time for 30 min interval
-            last_meter_sent = None
-            while True:
-                try:
-                    reading = simulate_readings()
-                    events = detect_events(reading, site_id)
-
-                    # Send power status change events
-                    for event in events:
-                        events_ref.add(event)
-                        logging.info(f"Event logged: {event}")
-
-                    # Send meter reading every 30 minutes regardless of events
-                    now = time.time()
-                    if (last_meter_sent is None) or (now - last_meter_sent > 1800):
-                        meter_event = create_meter_event(reading, site_id)
-                        events_ref.add(meter_event)
-                        logging.info(f"Meter reading event logged: {meter_event}")
-                        last_meter_sent = now
-
-                    time.sleep(10)  # short sleep to reduce load, adjust as needed
-
-                except Exception as e:
-                    logging.error(f"Inner loop error: {e}")
-                    time.sleep(10)
-                    # Attempt to reconnect Firestore on inner errors
-                    initialize_firestore()
-
-        except Exception as outer_e:
-            logging.error(f"Outer loop error: {outer_e}")
-            time.sleep(30)  # wait before retrying whole process
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            error_str = str(e).lower()
+            if "failed to connect" in error_str or "503" in error_str or "timeout" in error_str:
+                logging.critical("Connection error — restarting script...")
+                time.sleep(5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
