@@ -18,6 +18,7 @@ logging.basicConfig(
 # === Configuration Path ===
 CONFIG_PATH = '/home/mumbamukendi/site-monitor/config.json'
 CREDENTIALS_PATH = '/home/mumbamukendi/site-monitor/firebase-credentials/firebase.json'
+STATE_FILE = '/home/mumbamukendi/site-monitor/state.json'
 
 # === Read Site ID from config.json ===
 try:
@@ -80,6 +81,39 @@ last_event_time = {
 }
 last_meter_report = datetime.utcnow() - timedelta(minutes=30)
 last_meter_units = 1000
+
+# === Load State ===
+def load_state():
+    global last_state, last_meter_report, last_meter_units, last_event_time
+    try:
+        with open(STATE_FILE, 'r') as f:
+            state = json.load(f)
+            last_state = state.get('last_state', last_state)
+            last_meter_report = datetime.fromisoformat(state.get('last_meter_report', (datetime.utcnow() - timedelta(minutes=30)).isoformat()))
+            last_meter_units = state.get('last_meter_units', 1000)
+            last_event_time = {k: datetime.fromisoformat(v) for k, v in state.get('last_event_time', last_event_time).items()}
+        logging.info("State loaded from file")
+    except FileNotFoundError:
+        logging.info("No state file found, using default state")
+    except Exception as e:
+        logging.error(f"Failed to load state: {e}")
+
+load_state()
+
+# === Save State ===
+def save_state():
+    state = {
+        'last_state': last_state,
+        'last_meter_report': last_meter_report.isoformat(),
+        'last_meter_units': last_meter_units,
+        'last_event_time': {k: v.isoformat() for k, v in last_event_time.items()}
+    }
+    try:
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f)
+        logging.info("State saved to file")
+    except Exception as e:
+        logging.error(f"Failed to save state: {e}")
 
 # === Simulation Function ===
 def simulate_readings():
@@ -158,17 +192,24 @@ def create_meter_event(reading):
         "timestamp": datetime.utcnow()
     }
 
+def attempt_reconnect(max_retries=3, retry_delay=5):
+    for attempt in range(max_retries):
+        try:
+            db.collection('sites').limit(1).get()
+            logging.info(f"Reconnected to Firestore on attempt {attempt + 1}")
+            return True
+        except Exception as e:
+            logging.warning(f"Reconnection attempt {attempt + 1}/{max_retries} failed: {e}")
+            time.sleep(retry_delay)
+    logging.critical("All reconnection attempts failed")
+    return False
+
 def main():
     global db, site_ref, last_meter_units
-
     while True:
         try:
             reading = simulate_readings()
-
-            # Update real-time status
             readings_ref.document("latest").set(reading)
-
-            # Detect and push events
             batch = db.batch()
             events = detect_power_event(reading)
             if meter_event_due(reading, last_meter_units):
@@ -178,22 +219,22 @@ def main():
                 else:
                     events.append(create_meter_event(reading))
                 last_meter_units = reading["meter_units"]
-
             for event in events:
                 batch.set(events_ref.document(), event)
                 logging.info(f"Event queued: {event}")
-
             if events:
                 batch.commit()
                 logging.info(f"Batch committed with {len(events)} events")
-
+                save_state()
             time.sleep(random.randint(10, 20))
-
         except Exception as e:
             logging.error(f"Error: {e}")
             error_str = str(e).lower()
             if "failed to connect" in error_str or "503" in error_str or "timeout" in error_str:
-                logging.critical("Connection error — restarting script...")
+                logging.critical("Connection error — attempting reconnect...")
+                if attempt_reconnect():
+                    continue
+                logging.critical("Reconnection failed — restarting script...")
                 time.sleep(5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             time.sleep(10)
