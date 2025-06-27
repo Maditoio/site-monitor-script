@@ -16,12 +16,15 @@ logging.basicConfig(
 )
 
 # Load SITE_ID from config
+
 try:
     with open("/home/mumbamukendi/site-monitor/config.json") as f:
         config = json.load(f)
-        SITE_ID = config.get("site_id", "default_site")
+        SITE_ID = config.get("site_id")
+        if not SITE_ID:
+            raise ValueError("Missing site_id in config")
 except Exception as e:
-    logging.error(f"Failed to read config.json: {e}")
+    logging.error(f"[CONFIG ERROR] Failed to load site_id: {e}")
     SITE_ID = "default_site"
 
 # Firebase init
