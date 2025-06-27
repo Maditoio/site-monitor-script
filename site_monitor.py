@@ -1,4 +1,3 @@
-# v2.1 - Reliable AC/DC Event + Meter Updates
 import firebase_admin
 from firebase_admin import credentials, firestore
 import random
