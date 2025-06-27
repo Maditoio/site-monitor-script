@@ -72,17 +72,29 @@ last_state = {
     "phase3": True,
     "dc_power": True
 }
+last_event_time = {
+    "phase1": datetime.utcnow() - timedelta(minutes=1),
+    "phase2": datetime.utcnow() - timedelta(minutes=1),
+    "phase3": datetime.utcnow() - timedelta(minutes=1),
+    "dc_power": datetime.utcnow() - timedelta(minutes=1)
+}
 last_meter_report = datetime.utcnow() - timedelta(minutes=30)
+last_meter_units = 1000
 
 # === Simulation Function ===
 def simulate_readings():
+    def get_voltage():
+        if random.random() < 0.95:
+            return round(random.uniform(220, 240), 2)
+        return 0.0
+
     return {
-        'phase1_voltage': round(random.uniform(0, 240), 2),
-        'phase2_voltage': round(random.uniform(0, 240), 2),
-        'phase3_voltage': round(random.uniform(0, 240), 2),
-        'dc_battery_level': round(random.uniform(10, 15), 2),
+        'phase1_voltage': get_voltage(),
+        'phase2_voltage': get_voltage(),
+        'phase3_voltage': get_voltage(),
+        'dc_battery_level': round(random.uniform(12, 15), 2),
         'meter_units': round(random.uniform(1000, 2000), 2),
-        'dc_power_status': random.choice([True, False]),
+        'dc_power_status': random.random() < 0.9,
         'timestamp': firestore.SERVER_TIMESTAMP
     }
 
@@ -90,9 +102,7 @@ def voltage_ok(v):
     return v > 190
 
 def detect_power_event(reading):
-    global last_state
-    events = []
-
+    global last_state, last_event_time
     state_now = {
         "phase1": voltage_ok(reading['phase1_voltage']),
         "phase2": voltage_ok(reading['phase2_voltage']),
@@ -100,31 +110,38 @@ def detect_power_event(reading):
         "dc_power": reading['dc_power_status']
     }
 
+    changed_states = []
+    now = datetime.utcnow()
     for key in state_now:
-        if state_now[key] != last_state[key]:
+        if state_now[key] != last_state[key] and (now - last_event_time[key]).total_seconds() >= 60:
             status = "restored" if state_now[key] else "dropped"
-            events.append({
-                "site_id": SITE_ID,
-                "event_type": f"{key}_status_change",
-                "details": {
-                    "phase1": {"voltage": reading["phase1_voltage"], "status": "ok" if state_now["phase1"] else "off"},
-                    "phase2": {"voltage": reading["phase2_voltage"], "status": "ok" if state_now["phase2"] else "off"},
-                    "phase3": {"voltage": reading["phase3_voltage"], "status": "ok" if state_now["phase3"] else "off"},
-                    "dc_power": {"status": "on" if state_now["dc_power"] else "off"},
-                    "meter_units": reading["meter_units"]
-                },
-                "timestamp": datetime.utcnow()
-            })
+            changed_states.append(f"{key}_status_{status}")
             last_state[key] = state_now[key]
+            last_event_time[key] = now
 
-    return events
+    if changed_states:
+        return [{
+            "site_id": SITE_ID,
+            "event_type": "power_status_update",
+            "details": {
+                "phase1": {"voltage": reading["phase1_voltage"], "status": "ok" if state_now["phase1"] else "off"},
+                "phase2": {"voltage": reading["phase2_voltage"], "status": "ok" if state_now["phase2"] else "off"},
+                "phase3": {"voltage": reading["phase3_voltage"], "status": "ok" if state_now["phase3"] else "off"},
+                "dc_power": {"status": "on" if state_now["dc_power"] else "off"},
+                "meter_units": reading["meter_units"],
+                "changed_states": changed_states
+            },
+            "timestamp": datetime.utcnow()
+        }]
+    return []
 
-def meter_event_due():
+def meter_event_due(reading, last_meter_units):
     global last_meter_report
     now = datetime.utcnow()
     if (now - last_meter_report).total_seconds() >= 1800:
-        last_meter_report = now
-        return True
+        if abs(reading["meter_units"] - last_meter_units) > 10:
+            last_meter_report = now
+            return True
     return False
 
 def create_meter_event(reading):
@@ -142,7 +159,7 @@ def create_meter_event(reading):
     }
 
 def main():
-    global db, site_ref
+    global db, site_ref, last_meter_units
 
     while True:
         try:
@@ -152,13 +169,23 @@ def main():
             readings_ref.document("latest").set(reading)
 
             # Detect and push events
+            batch = db.batch()
             events = detect_power_event(reading)
-            if meter_event_due():
-                events.append(create_meter_event(reading))
+            if meter_event_due(reading, last_meter_units):
+                if events:
+                    events[0]["event_type"] = "combined_power_meter_update"
+                    events[0]["details"]["meter_update"] = True
+                else:
+                    events.append(create_meter_event(reading))
+                last_meter_units = reading["meter_units"]
 
             for event in events:
-                events_ref.add(event)
-                logging.info(f"Event sent: {event}")
+                batch.set(events_ref.document(), event)
+                logging.info(f"Event queued: {event}")
+
+            if events:
+                batch.commit()
+                logging.info(f"Batch committed with {len(events)} events")
 
             time.sleep(random.randint(10, 20))
 
