@@ -64,14 +64,17 @@ site_ref = get_site_ref()
 if not site_ref:
     sys.exit(1)
 
-# === Reference for the events subcollection inside the site document ===
-events_ref = site_ref.collection("events")
+# === References for Firestore collections ===
 
-# === Reference for the flat top-level latest_status document for this site ===
-# This is where we now store the latest power status — NOT inside 'sites' collection or subcollections
+# Flat top-level collection to store latest power status per site
 latest_status_ref = db.collection('latest_status').document(SITE_ID)
 
-# === Fetch site_name once for denormalization (to avoid querying repeatedly) ===
+# Root-level 'events' collection, each site has a document
+# Inside each site document, 'event_docs' subcollection holds individual event documents
+events_root_ref = db.collection('events')
+events_ref = events_root_ref.document(SITE_ID).collection('event_docs')
+
+# === Fetch site_name once for denormalization ===
 def get_site_name(site_ref):
     try:
         doc = site_ref.get()
@@ -244,10 +247,10 @@ def main():
                 'site_name': site_name,  # denormalized for UI convenience
             }
 
-            # Write latest status to 'latest_status/{SITE_ID}' (no nested sites subcollections)
+            # Write latest status to 'latest_status/{SITE_ID}' (flat structure)
             latest_status_ref.set(latest_doc)
 
-            # Event detection and batching remains exactly as before
+            # Event detection and batching remains as before
             batch = db.batch()
             events = detect_power_event(reading)
 
@@ -259,7 +262,7 @@ def main():
                     events.append(create_meter_event(reading))
                 last_meter_units = reading["meter_units"]
 
-            # Add events to batch to write to 'sites/{siteDocId}/events' subcollection
+            # Add events to batch to write to 'events/{SITE_ID}/event_docs/{eventId}'
             for event in events:
                 batch.set(events_ref.document(), event)
                 logging.info(f"Event queued: {event}")
@@ -285,6 +288,7 @@ def main():
                 logging.critical("Reconnection failed — restarting script...")
                 time.sleep(5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
+            # Generic delay before retry on error
             time.sleep(10)
 
 if __name__ == "__main__":
