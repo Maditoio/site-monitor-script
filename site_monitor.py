@@ -235,10 +235,13 @@ def attempt_reconnect(max_retries=3, retry_delay=5):
 # === Main loop: simulate readings, write latest status, handle events ===
 def main():
     global db, site_ref, last_meter_units
+    last_forced_update = datetime.utcnow() - timedelta(minutes=16)  # force update on start
     while True:
         try:
             # Simulate power readings
             reading = simulate_readings()
+            now = datetime.utcnow()
+            time_since_forced = (now - last_forced_update).total_seconds()
 
             # Prepare latest status document for flat root-level collection
             latest_doc = {
@@ -247,29 +250,31 @@ def main():
                 'site_name': site_name,  # denormalized for UI convenience
             }
 
-            # Write latest status to 'latest_status/{SITE_ID}' (flat structure)
-            latest_status_ref.set(latest_doc)
-
-            # Event detection and batching remains as before
             batch = db.batch()
-            events = detect_power_event(reading)
 
-            if meter_event_due(reading, last_meter_units):
+            # Send forced update every 15 minutes even if no event
+            if time_since_forced >= 15 * 60:
+                latest_status_ref.set(latest_doc)
+                last_forced_update = now
+                logging.info(f"Forced status update sent at {now.isoformat()}")
+            else:
+                # Only update latest_status if there's a power event or meter event
+                events = detect_power_event(reading)
+
+                if meter_event_due(reading, last_meter_units):
+                    if events:
+                        events[0]["event_type"] = "combined_power_meter_update"
+                        events[0]["details"]["meter_update"] = True
+                    else:
+                        events.append(create_meter_event(reading))
+                    last_meter_units = reading["meter_units"]
+
                 if events:
-                    events[0]["event_type"] = "combined_power_meter_update"
-                    events[0]["details"]["meter_update"] = True
-                else:
-                    events.append(create_meter_event(reading))
-                last_meter_units = reading["meter_units"]
-
-            # Add events to batch to write to 'events/{SITE_ID}/event_docs/{eventId}'
-            for event in events:
-                batch.set(events_ref.document(), event)
-                logging.info(f"Event queued: {event}")
-
-            if events:
-                batch.commit()
-                logging.info(f"Batch committed with {len(events)} events")
+                    latest_status_ref.set(latest_doc)
+                    for event in events:
+                        batch.set(events_ref.document(), event)
+                    batch.commit()
+                    logging.info(f"Power events batch committed with {len(events)} events")
 
             # Persist current state to file
             save_state()
