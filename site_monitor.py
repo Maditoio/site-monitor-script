@@ -122,14 +122,23 @@ def simulate_readings():
             return round(random.uniform(220, 240), 2)
         return 0.0
 
+    # Generate readings
+    phase1_voltage = get_voltage()
+    phase2_voltage = get_voltage()
+    phase3_voltage = get_voltage()
+    
+    # Calculate ac_power_status (True if all phases have voltage > 190)
+    ac_power_status = all(voltage > 190 for voltage in [phase1_voltage, phase2_voltage, phase3_voltage])
+    
     return {
-        'phase1_voltage': get_voltage(),
-        'phase2_voltage': get_voltage(),
-        'phase3_voltage': get_voltage(),
+        'phase1_voltage': phase1_voltage,
+        'phase2_voltage': phase2_voltage,
+        'phase3_voltage': phase3_voltage,
         'dc_battery_level': round(random.uniform(12, 15), 2),
         'meter_units': round(random.uniform(1000, 2000), 2),
         'dc_power_status': random.random() < 0.9,
-        'timestamp': firestore.SERVER_TIMESTAMP
+        'ac_power_status': ac_power_status,
+        'updated_at': firestore.SERVER_TIMESTAMP
     }
 
 def voltage_ok(v):
