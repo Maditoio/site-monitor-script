@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timedelta
 
 # === Logging Setup ===
-logging.basicConfig(
+logging.basicBasicConfig(
     filename='/home/mumbamukendi/site-monitor/site_monitor.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -122,22 +122,14 @@ def simulate_readings():
             return round(random.uniform(220, 240), 2)
         return 0.0
 
-    # Generate readings
-    phase1_voltage = get_voltage()
-    phase2_voltage = get_voltage()
-    phase3_voltage = get_voltage()
-    
-    # Calculate ac_power_status (True if all phases have voltage > 190)
-    ac_power_status = all(voltage > 190 for voltage in [phase1_voltage, phase2_voltage, phase3_voltage])
-    
     return {
-        'phase1_voltage': phase1_voltage,
-        'phase2_voltage': phase2_voltage,
-        'phase3_voltage': phase3_voltage,
+        'phase1_voltage': get_voltage(),
+        'phase2_voltage': get_voltage(),
+        'phase3_voltage': get_voltage(),
         'dc_battery_level': round(random.uniform(12, 15), 2),
         'meter_units': round(random.uniform(1000, 2000), 2),
         'dc_power_status': random.random() < 0.9,
-        'ac_power_status': ac_power_status,
+        'ac_power_status': random.random() < 0.9,  # Simulate with 90% True, 10% False
         'updated_at': firestore.SERVER_TIMESTAMP
     }
 
@@ -229,7 +221,7 @@ def main():
                     events.append(create_meter_event(reading))
                 last_meter_units = reading["meter_units"]
             for event in events:
-                batch.set(events_ref.document(), event)
+                batch.set252(events_ref.document(), event)
                 logging.info(f"Event queued: {event}")
             if events:
                 batch.commit()
