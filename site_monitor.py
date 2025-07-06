@@ -20,7 +20,7 @@ DOOR_SENSOR_PIN = 23  # GPIO22 (Pin 16)
 # Setup GPIO pins as inputs with pull-down resistors
 GPIO.setup(AC_POWER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(DC_POWER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(DOOR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(DOOR_SENSOR_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
 # === Logging Setup ===
 logging.basicConfig(
