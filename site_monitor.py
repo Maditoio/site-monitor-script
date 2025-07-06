@@ -118,16 +118,28 @@ def load_state():
     try:
         with open(STATE_FILE, 'r') as f:
             state = json.load(f)
-            last_state = state.get('last_state', last_state)
+            
+            # Safely load last_state with defaults
+            saved_state = state.get('last_state', {})
+            for key in last_state:
+                if key in saved_state:
+                    last_state[key] = saved_state[key]
+            
+            # Safely load last_event_time with defaults
             last_event_time_data = state.get('last_event_time', {})
             for key in last_event_time:
                 if key in last_event_time_data:
-                    last_event_time[key] = datetime.fromisoformat(last_event_time_data[key])
+                    try:
+                        last_event_time[key] = datetime.fromisoformat(last_event_time_data[key])
+                    except ValueError:
+                        logging.warning(f"Invalid datetime format for {key}, using default")
+                        
         logging.info("State loaded from file")
     except FileNotFoundError:
         logging.info("No state file found, using default state")
     except Exception as e:
         logging.error(f"Failed to load state: {e}")
+        logging.info("Using default state values")
 
 load_state()
 
@@ -179,13 +191,21 @@ def detect_status_events(reading):
     now = datetime.utcnow()
     
     for key in state_now:
+        # Ensure the key exists in last_state and last_event_time
+        if key not in last_state:
+            last_state[key] = False
+        if key not in last_event_time:
+            last_event_time[key] = datetime.utcnow() - timedelta(minutes=1)
+            
         # If status changed AND last change was at least 10 seconds ago, record event
         if state_now[key] != last_state[key] and (now - last_event_time[key]).total_seconds() >= 10:
             if key == "door_sensor":
                 status = "opened" if state_now[key] else "closed"
+                previous_status = "opened" if last_state[key] else "closed"
                 event_type = "door_status_change"
             else:
                 status = "on" if state_now[key] else "off"
+                previous_status = "on" if last_state[key] else "off"
                 event_type = "power_status_change"
             
             events.append({
@@ -194,7 +214,7 @@ def detect_status_events(reading):
                 "details": {
                     "component": key,
                     "status": status,
-                    "previous_status": "on" if last_state[key] else "off" if key != "door_sensor" else ("opened" if last_state[key] else "closed"),
+                    "previous_status": previous_status,
                     "ac_power_status": state_now["ac_power"],
                     "dc_power_status": state_now["dc_power"],
                     "door_sensor_status": state_now["door_sensor"]
