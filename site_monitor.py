@@ -273,36 +273,44 @@ def main():
                 now = datetime.utcnow()
                 time_since_heartbeat = (now - last_heartbeat).total_seconds()
 
-                # Prepare latest status document for flat root-level collection
-                latest_doc = {
-                    **reading,
-                    'site_id': SITE_ID,
-                    'site_name': site_name,  # denormalized for UI convenience
-                }
-
                 # Detect status change events
                 events = detect_status_events(reading)
 
+                # Check if heartbeat is due (every 2 minutes)
+                heartbeat_due = time_since_heartbeat >= 120
+
                 # Send heartbeat every 2 minutes even if no events
-                if time_since_heartbeat >= 120:  # 2 minutes
+                if heartbeat_due:
                     if not events:  # Only add heartbeat if no other events
                         events.append(create_heartbeat_event(reading))
                     last_heartbeat = now
                     logging.info(f"Heartbeat sent at {now.isoformat()}")
 
-                # Always update latest status
-                latest_status_ref.set(latest_doc)
+                # ONLY update Firestore under these 3 conditions:
+                # 1. Power status changed (AC or DC)
+                # 2. Door sensor changed
+                # 3. Heartbeat is due (every 2 minutes)
+                if events or heartbeat_due:
+                    # Prepare latest status document for flat root-level collection
+                    latest_doc = {
+                        **reading,
+                        'site_id': SITE_ID,
+                        'site_name': site_name,  # denormalized for UI convenience
+                    }
 
-                # If there are events, write them to Firestore
-                if events:
-                    batch = db.batch()
-                    for event in events:
-                        batch.set(events_ref.document(), event)
-                    batch.commit()
-                    logging.info(f"Events batch committed with {len(events)} events")
+                    # Update latest status
+                    latest_status_ref.set(latest_doc)
 
-                # Persist current state to file
-                save_state()
+                    # If there are events, write them to Firestore
+                    if events:
+                        batch = db.batch()
+                        for event in events:
+                            batch.set(events_ref.document(), event)
+                        batch.commit()
+                        logging.info(f"Events batch committed with {len(events)} events")
+
+                    # Persist current state to file
+                    save_state()
 
                 # Wait 5 seconds before next reading
                 time.sleep(5)
