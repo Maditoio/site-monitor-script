@@ -15,7 +15,7 @@ GPIO.setwarnings(False)
 # GPIO Pin definitions
 AC_POWER_PIN = 17  # GPIO17 (Pin 11)
 DC_POWER_PIN = 27  # GPIO27 (Pin 13)
-DOOR_SENSOR_PIN = 22  # GPIO22 (Pin 15)
+DOOR_SENSOR_PIN = 23  # GPIO22 (Pin 16)
 
 # Setup GPIO pins as inputs with pull-down resistors
 GPIO.setup(AC_POWER_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
